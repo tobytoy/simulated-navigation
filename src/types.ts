@@ -55,3 +55,16 @@ export interface SimulationLog {
   type: 'info' | 'warning' | 'alert' | 'voice';
   message: string;
 }
+
+export interface RouteAnalysis {
+  id: string;
+  name: string;
+  start_name: string;
+  end_name: string;
+  mode: 'drive' | 'walk' | 'bike';
+  coordinates: [number, number][];
+  distance_meters: number;
+  duration_seconds: number;
+  created_at: string;
+}
+

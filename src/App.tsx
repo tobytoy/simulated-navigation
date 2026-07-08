@@ -43,7 +43,8 @@ import {
   TrafficSegment,
   TrafficEvent,
   NavState,
-  SimulationLog
+  SimulationLog,
+  RouteAnalysis
 } from './types';
 
 import {
@@ -115,8 +116,12 @@ export default function App() {
   const [logs, setLogs] = useState<SimulationLog[]>([]);
   const [apiTerminalLogs, setApiTerminalLogs] = useState<string[]>([]);
   
-  // View mode state: 2D overhead map, 3D tilted HUD map, or 1st-person simulated driving cabin view
-  const [viewMode, setViewMode] = useState<'2d' | '3d' | 'driver'>('2d');
+  // View mode state: 2D overhead map, 3D tilted HUD map, 1st-person simulated driving cabin view, or route analysis view
+  const [viewMode, setViewMode] = useState<'2d' | '3d' | 'driver' | 'analysis'>('2d');
+  
+  // Route Analysis states
+  const [routeAnalyses, setRouteAnalyses] = useState<RouteAnalysis[]>([]);
+  const [selectedAnalysisId, setSelectedAnalysisId] = useState<string | null>(null);
   
   // Navigation State
   const [nav, setNav] = useState<NavState>({
@@ -150,6 +155,11 @@ export default function App() {
   const segmentPolylinesRef = useRef<L.Polyline[]>([]);
   const routePolylineRef = useRef<L.Polyline | null>(null);
   const checkpointMarkersRef = useRef<L.Marker[]>([]);
+  
+  // Route Analysis refs
+  const analysisPolylineRef = useRef<L.Polyline | null>(null);
+  const analysisStartMarkerRef = useRef<L.Marker | null>(null);
+  const analysisEndMarkerRef = useRef<L.Marker | null>(null);
   
   // Simulation Loop Ref
   const timerRef = useRef<any>(null);
@@ -282,6 +292,28 @@ export default function App() {
           setEvents(loadedEvents);
           addLog('info', `📡 已從 Supabase 載入 ${loadedEvents.length} 個路況事件與測速點！`);
         }
+
+        // 4. Fetch route analyses
+        const { data: dbAnalyses, error: analysesError } = await supabase
+          .from('route_analyses')
+          .select('*')
+          .order('created_at', { ascending: false });
+        
+        if (dbAnalyses && !analysesError) {
+          const formattedAnalyses = dbAnalyses.map(a => ({
+            id: a.id,
+            name: a.name,
+            start_name: a.start_name,
+            end_name: a.end_name,
+            mode: a.mode,
+            coordinates: a.coordinates,
+            distance_meters: a.distance_meters,
+            duration_seconds: a.duration_seconds,
+            created_at: a.created_at
+          }));
+          setRouteAnalyses(formattedAnalyses);
+          addLog('info', `📡 已從 Supabase 載入 ${formattedAnalyses.length} 條跨路網 analysis 線路！`);
+        }
       } catch (err) {
         console.error('Supabase initial fetch error:', err);
         addLog('warning', `⚠️ 無法從 Supabase 讀取資料，系統回退至本地離線模擬模式。`);
@@ -373,9 +405,48 @@ export default function App() {
       )
       .subscribe();
 
+    const analysesChannel = supabase
+      .channel('realtime_analyses')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'route_analyses' },
+        (payload) => {
+          const newRecord = payload.new as any;
+          const oldRecord = payload.old as any;
+          const eventType = payload.eventType;
+
+          if (eventType === 'INSERT') {
+            const newAnalysis = {
+              id: newRecord.id,
+              name: newRecord.name,
+              start_name: newRecord.start_name,
+              end_name: newRecord.end_name,
+              mode: newRecord.mode,
+              coordinates: newRecord.coordinates,
+              distance_meters: newRecord.distance_meters,
+              duration_seconds: newRecord.duration_seconds,
+              created_at: newRecord.created_at
+            };
+            setRouteAnalyses(prev => {
+              if (prev.some(a => a.id === newAnalysis.id)) return prev;
+              return [newAnalysis, ...prev];
+            });
+            addLog('info', `📡 [路網分析] 接收到全新規劃路徑：${newAnalysis.name}！`);
+          } else if (eventType === 'DELETE') {
+            const deleteId = oldRecord ? oldRecord.id : null;
+            if (deleteId) {
+              setRouteAnalyses(prev => prev.filter(a => a.id !== deleteId));
+              addLog('info', `📡 [路網分析] 刪除規劃路徑 ID: ${deleteId}`);
+            }
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
       supabase.removeChannel(alertsChannel);
       supabase.removeChannel(segmentsChannel);
+      supabase.removeChannel(analysesChannel);
     };
   }, []);
 
@@ -914,6 +985,157 @@ export default function App() {
 
   }, [viewMode, nav.currentPointIndex]);
 
+  // Sync / Draw Selected Route Analysis on Map
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    // 1. Clear previous layers
+    if (analysisPolylineRef.current) {
+      analysisPolylineRef.current.remove();
+      analysisPolylineRef.current = null;
+    }
+    if (analysisStartMarkerRef.current) {
+      analysisStartMarkerRef.current.remove();
+      analysisStartMarkerRef.current = null;
+    }
+    if (analysisEndMarkerRef.current) {
+      analysisEndMarkerRef.current.remove();
+      analysisEndMarkerRef.current = null;
+    }
+
+    if (viewMode !== 'analysis' || !selectedAnalysisId) return;
+
+    const activeAnalysis = routeAnalyses.find(r => r.id === selectedAnalysisId);
+    if (!activeAnalysis || !activeAnalysis.coordinates || activeAnalysis.coordinates.length === 0) return;
+
+    const latlngs = activeAnalysis.coordinates.map(c => L.latLng(c[0], c[1]));
+
+    // Determine color based on mode
+    let color = '#a78bfa'; // purple default
+    let dashArray = undefined;
+    if (activeAnalysis.mode === 'walk') {
+      color = '#f97316'; // orange-red
+      dashArray = '5, 8';
+    } else if (activeAnalysis.mode === 'bike') {
+      color = '#10b981'; // emerald
+      dashArray = '8, 8';
+    } else if (activeAnalysis.mode === 'drive') {
+      color = '#8b5cf6'; // violet/purple
+    }
+
+    // Draw path
+    const polyline = L.polyline(latlngs, {
+      color,
+      weight: 6,
+      opacity: 0.85,
+      dashArray,
+      lineCap: 'round',
+      lineJoin: 'round'
+    }).addTo(map);
+
+    analysisPolylineRef.current = polyline;
+
+    // Draw Start Marker
+    const startHtml = `
+      <div class="relative flex items-center justify-center w-8 h-8 rounded-full bg-slate-900 border-2 border-emerald-500 text-emerald-400 font-bold shadow-xl animate-pulse flex items-center justify-center">
+        <span class="text-xs select-none">🟢</span>
+      </div>
+    `;
+    const startIcon = L.divIcon({
+      className: 'analysis-start-icon',
+      html: startHtml,
+      iconSize: [32, 32],
+      iconAnchor: [16, 16]
+    });
+    const startMarker = L.marker(latlngs[0], { icon: startIcon }).addTo(map);
+    startMarker.bindPopup(`
+      <div class="p-1 font-sans text-xs bg-slate-950 text-white rounded">
+        <p class="font-bold text-emerald-400 border-b border-slate-800 pb-0.5 mb-1">🟢 起點 (Departure)</p>
+        <p class="text-slate-300 font-medium">${activeAnalysis.start_name}</p>
+      </div>
+    `, { closeButton: false });
+    analysisStartMarkerRef.current = startMarker;
+
+    // Draw End Marker
+    const endHtml = `
+      <div class="relative flex items-center justify-center w-8 h-8 rounded-full bg-slate-900 border-2 border-red-500 text-red-400 font-bold shadow-xl flex items-center justify-center">
+        <span class="text-xs select-none">🏁</span>
+      </div>
+    `;
+    const endIcon = L.divIcon({
+      className: 'analysis-end-icon',
+      html: endHtml,
+      iconSize: [32, 32],
+      iconAnchor: [16, 16]
+    });
+    const endMarker = L.marker(latlngs[latlngs.length - 1], { icon: endIcon }).addTo(map);
+    endMarker.bindPopup(`
+      <div class="p-1 font-sans text-xs bg-slate-950 text-white rounded">
+        <p class="font-bold text-red-400 border-b border-slate-800 pb-0.5 mb-1">🏁 終點 (Destination)</p>
+        <p class="text-slate-300 font-medium">${activeAnalysis.end_name}</p>
+      </div>
+    `, { closeButton: false });
+    analysisEndMarkerRef.current = endMarker;
+
+    // Fit map bounds
+    map.fitBounds(polyline.getBounds(), { padding: [50, 50] });
+
+  }, [viewMode, selectedAnalysisId, routeAnalyses]);
+
+  // Import Analysis Route to Simulation checkpoints
+  const handleImportRouteForSimulation = () => {
+    if (!selectedAnalysisId) return;
+    const activeAnalysis = routeAnalyses.find(r => r.id === selectedAnalysisId);
+    if (!activeAnalysis || !activeAnalysis.coordinates || activeAnalysis.coordinates.length === 0) return;
+
+    // Convert OSMnx coordinate path (which is already high resolution) to RoutePoint[]
+    const mappedRoutePoints = activeAnalysis.coordinates.map((c, idx) => ({
+      lat: c[0],
+      lng: c[1],
+      streetName: idx === 0 
+        ? `${activeAnalysis.start_name} (起點)` 
+        : idx === activeAnalysis.coordinates.length - 1 
+          ? `${activeAnalysis.end_name} (終點)` 
+          : `${activeAnalysis.name} 路段`,
+      speedLimit: activeAnalysis.mode === 'walk' ? 10 : activeAnalysis.mode === 'bike' ? 20 : 50,
+      instruction: idx === 0 
+        ? `出發：從 ${activeAnalysis.start_name} 開始模擬移動` 
+        : idx === activeAnalysis.coordinates.length - 1 
+          ? `抵達：已安全抵達 ${activeAnalysis.end_name}` 
+          : `行經 ${activeAnalysis.name} 路段`,
+    }));
+
+    // Update simulation routes state
+    setRoutePoints(mappedRoutePoints);
+    // Create minimal checkpoints for simulation HUD
+    setCheckpoints([
+      mappedRoutePoints[0],
+      mappedRoutePoints[Math.floor(mappedRoutePoints.length / 2)],
+      mappedRoutePoints[mappedRoutePoints.length - 1]
+    ]);
+
+    // Update navigation states
+    setNav(prev => ({
+      ...prev,
+      currentPointIndex: 0,
+      currentSpeed: 0,
+      isDriving: true,
+      isPaused: false
+    }));
+
+    // Re-center map to the first point
+    const map = mapRef.current;
+    if (map) {
+      map.setView([mappedRoutePoints[0].lat, mappedRoutePoints[0].lng], 16);
+    }
+
+    // Switch view mode to driver cockpit
+    setViewMode('driver');
+    addLog('info', `🚗 成功將路網分析「${activeAnalysis.name}」匯入模擬器！開始行車模擬。`);
+    speak(`導航已匯入：從 ${activeAnalysis.start_name} 至 ${activeAnalysis.end_name}。即將開始行駛模擬。`);
+  };
+
   // Trigger simulated voice play
   const playManualVoiceHelp = () => {
     const currentPoint = routePoints[nav.currentPointIndex];
@@ -1305,6 +1527,20 @@ export default function App() {
               >
                 <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping shrink-0" />
                 模擬開車 (Driver)
+              </button>
+              <button
+                onClick={() => {
+                  setViewMode('analysis');
+                  setNav(p => ({ ...p, hudTilt: false }));
+                  addLog('info', '📍 切換為：OSM 拓撲路網規劃與分析視角');
+                }}
+                className={`py-1 px-2.5 rounded text-[10px] font-bold font-mono uppercase tracking-wider transition-all cursor-pointer ${
+                  viewMode === 'analysis'
+                    ? 'bg-purple-600 text-white shadow shadow-purple-950/25'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                路網分析 (OSM)
               </button>
             </div>
 
@@ -1918,7 +2154,102 @@ export default function App() {
         <div className="xl:col-span-4 flex flex-col gap-4">
           
           {/* Simulation Control Deck */}
-          <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-lg flex flex-col gap-4">
+                    {/* OSMnx Route Analysis Control Panel (Alternative View Mode Panel) */}
+          {viewMode === 'analysis' ? (
+            <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-lg flex flex-col gap-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                <div className="flex items-center gap-2">
+                  <Navigation className="w-4 h-4 text-purple-500" />
+                  <h2 className="text-xs font-bold tracking-widest text-slate-200 uppercase font-mono">📍 OSMnx 跨路網分析面板</h2>
+                </div>
+                <span className="text-[9px] font-mono bg-purple-950/50 text-purple-400 py-0.5 px-2 rounded border border-purple-800/40 font-bold">REALTIME SYNC</span>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block font-mono">選擇規劃好的路網分析：</label>
+                {routeAnalyses.length === 0 ? (
+                  <div className="text-slate-500 text-xs py-4 text-center border border-dashed border-slate-850 rounded-lg">
+                    資料庫目前沒有已儲存的路網分析。<br/>請至 Streamlit 後台規劃並上傳！
+                  </div>
+                ) : (
+                  <select
+                    value={selectedAnalysisId || ''}
+                    onChange={(e) => setSelectedAnalysisId(e.target.value || null)}
+                    className="w-full bg-slate-950 text-slate-200 border border-slate-800 rounded px-2.5 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-purple-600 transition-all font-sans"
+                  >
+                    <option value="">-- 請選擇一個路網分析 --</option>
+                    {routeAnalyses.map(r => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              {(() => {
+                const activeAnalysis = routeAnalyses.find(r => r.id === selectedAnalysisId);
+                if (activeAnalysis) {
+                  return (
+                    <div className="flex flex-col gap-4 animate-fade-in">
+                      <div className="bg-slate-950 p-3.5 rounded-lg border border-slate-850 flex flex-col gap-2.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[9px] font-mono text-purple-400 font-bold uppercase">路網資訊 CARD</span>
+                          <span className="text-xs font-bold">
+                            {activeAnalysis.mode === 'walk' ? '🚶 步行模式' : activeAnalysis.mode === 'bike' ? '🚲 自行車模式' : '🚗 汽車道路模式'}
+                          </span>
+                        </div>
+                        
+                        <div className="border-t border-slate-850 my-1"></div>
+
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[9px] text-slate-500 font-mono uppercase block">起點位置</span>
+                          <span className="text-xs text-slate-200 font-bold block">{activeAnalysis.start_name}</span>
+                        </div>
+                        
+                        <div className="flex flex-col gap-1 mt-1">
+                          <span className="text-[9px] text-slate-500 font-mono uppercase block">終點位置</span>
+                          <span className="text-xs text-slate-200 font-bold block">{activeAnalysis.end_name}</span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 mt-2">
+                          <div className="bg-slate-900/60 p-2 rounded border border-slate-800 text-center">
+                            <span className="text-slate-500 text-[8px] block font-mono uppercase">計算總距離</span>
+                            <span className="text-sm font-bold text-white font-mono mt-0.5 block">
+                              {activeAnalysis.distance_meters > 1000 
+                                ? `${(activeAnalysis.distance_meters / 1000).toFixed(2)} km`
+                                : `${Math.round(activeAnalysis.distance_meters)} m`}
+                            </span>
+                          </div>
+                          <div className="bg-slate-900/60 p-2 rounded border border-slate-800 text-center">
+                            <span className="text-slate-500 text-[8px] block font-mono uppercase">預估移動耗時</span>
+                            <span className="text-sm font-bold text-yellow-400 font-mono mt-0.5 block">
+                              {Math.round(activeAnalysis.duration_seconds / 60)} 分鐘
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={handleImportRouteForSimulation}
+                        className="w-full bg-purple-600 hover:bg-purple-500 text-white py-2.5 px-4 rounded-lg font-bold text-xs font-mono transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-purple-950/20 active:scale-98"
+                      >
+                        <Play className="w-4 h-4 animate-pulse" />
+                        🚗 匯入為行車模擬，開始開車！
+                      </button>
+                    </div>
+                  );
+                } else {
+                  return (
+                    <div className="text-slate-500 text-xs py-8 text-center border border-dashed border-slate-850 rounded-lg">
+                      💡 點選上方下拉選單以載入路網拓撲！
+                    </div>
+                  );
+                }
+              })()}
+            </div>
+          ) : (
+<div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-lg flex flex-col gap-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
               <div className="flex items-center gap-2">
                 <Sliders className="w-4 h-4 text-blue-500" />
@@ -2094,6 +2425,7 @@ export default function App() {
               </span>
             </div>
           </div>
+          )}
 
           {/* Interactive API Probe / Real-time TDX JSON Inspector */}
           <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-lg flex-1 flex flex-col min-h-[300px]">

@@ -61,13 +61,16 @@ except Exception as e:
     st.error(f"無法初始化 Supabase 客戶端: {e}")
     st.stop()
 
-# 建立分頁標籤
-tab1, tab2, tab3 = st.tabs(["📂 靜態資料管理器", "⚡ 動態路況發布中心", "💻 SQL 終端機"])
+# 建立功能分頁（使用 sidebar radio 隔離執行上下文，防止跨頁狀態串場）
+page = st.sidebar.radio(
+    "📋 選擇功能分頁",
+    ["📂 靜態資料管理器", "⚡ 動態路況發布中心", "💻 SQL 終端機", "📍 跨路網分析"]
+)
 
 # =========================================================================
 # TAB 1: 靜態資料管理器
 # =========================================================================
-with tab1:
+if page == "📂 靜態資料管理器":
     st.header("📂 靜態圖資資料庫管理")
     st.markdown("檢視目前 Supabase 資料庫中的靜態路線、路段與固定式路標資料。")
 
@@ -176,7 +179,7 @@ with tab1:
 # =========================================================================
 # TAB 2: 動態路況發布中心
 # =========================================================================
-with tab2:
+if page == "⚡ 動態路況發布中心":
     st.header("⚡ 實時路況動態警報模擬器")
     st.markdown("發佈或解除臨時性路況警告，React 前端將即時彈出事件標記並進行語音通知。")
 
@@ -280,7 +283,7 @@ with tab2:
 # =========================================================================
 # TAB 3: SQL 終端機
 # =========================================================================
-with tab3:
+if page == "💻 SQL 終端機":
     st.header("💻 SQL 資料庫終端機 (SQL Executer)")
     st.markdown("直接輸入 SQL 指令對 Supabase 資料庫進行查詢或修改（如快速更新路段速限、狀態等）。")
 
@@ -328,3 +331,164 @@ with tab3:
                 conn.close()
             except Exception as e:
                 st.error(f"執行 SQL 發生錯誤: {e}")
+
+
+# =========================================================================
+# TAB 4: 跨路網分析 (OSMnx Route Planner)
+# =========================================================================
+if page == "📍 跨路網分析":
+    st.header("📍 OSMnx 跨路網分析規劃器")
+    st.markdown("輸入任意起訖地名（如「台北101」、「東門站」），利用 OpenStreetMap 進行真實道路拓撲之最短路徑計算（人行、車行、自行車），並即時發佈至 Supabase！")
+
+    col1, col2 = st.columns([2, 3])
+
+    with col1:
+        st.subheader("🗺️ 設定起訖點與路網模式")
+        start_addr = st.text_input("🟢 起點地標/地址 (Start)", value="台北101")
+        end_addr = st.text_input("🏁 終點地標/地址 (Destination)", value="中正紀念堂")
+        
+        mode_choice = st.selectbox("🚶/🚗/🚲 移動模式 (Mode)", [
+            ("drive", "🚗 汽車道路 (Drive)"),
+            ("walk", "🚶 步行專用 (Walk)"),
+            ("bike", "🚲 自行車道 (Bike)")
+        ], format_func=lambda x: x[1])
+
+        st.info("💡 第一次計算新地點時，系統需要下載 OpenStreetMap 地圖拓撲（約需 10-20 秒）。後續計算相同區域會加速。")
+        
+        run_analysis = st.button("⚡ 開始計算路網最短路徑", width="stretch", type="primary")
+
+    with col2:
+        st.subheader("📊 規劃路徑結果")
+        if run_analysis:
+            if not start_addr or not end_addr:
+                st.error("請輸入起點與終點名稱。")
+            else:
+                with st.spinner("正在進行地理編碼 (Geocoding)..."):
+                    try:
+                        import osmnx as ox
+                        import networkx as nx
+                        import pandas as pd
+                        
+                        # 1. Geocode locations
+                        start_coords = ox.geocode(start_addr)
+                        end_coords = ox.geocode(end_addr)
+                        
+                        st.success(f"📍 解析成功！\n- 起點「{start_addr}」: {start_coords}\n- 終點「{end_addr}」: {end_coords}")
+                        
+                        # Save coords for calculation
+                        start_lat, start_lng = start_coords
+                        end_lat, end_lng = end_coords
+                        
+                    except Exception as e:
+                        st.error(f"地理編碼解析失敗 (找不到該地標): {e}")
+                        st.stop()
+
+                with st.spinner("正在下載並建構 OpenStreetMap 道路拓撲網路..."):
+                    try:
+                        # Compute center point and bounding box diameter
+                        center_lat = (start_lat + end_lat) / 2
+                        center_lng = (start_lng + end_lng) / 2
+                        
+                        # Haversine distance to decide buffer size
+                        import math
+                        def get_dist(la1, lo1, la2, lo2):
+                            R = 6371e3
+                            phi1 = la1 * math.pi / 180
+                            phi2 = la2 * math.pi / 180
+                            dphi = (la2 - la1) * math.pi / 180
+                            dlam = (lo2 - lo1) * math.pi / 180
+                            a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
+                            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+                            return R * c
+                        
+                        dist_between = get_dist(start_lat, start_lng, end_lat, end_lng)
+                        # Add a 1000m padding to ensure both points are inside the graph
+                        buffer_dist = max(1500.0, dist_between / 2 + 1000.0)
+                        
+                        # Adjust graph network type based on mode selection
+                        osm_network_type = "drive"
+                        if mode_choice[0] == "walk":
+                            osm_network_type = "walk"
+                        elif mode_choice[0] == "bike":
+                            osm_network_type = "bike"
+                            
+                        # Download graph
+                        st.write(f"正在載入中心點周邊 {round(buffer_dist)} 公尺範圍內之 '{osm_network_type}' 路網...")
+                        G = ox.graph_from_point((center_lat, center_lng), dist=buffer_dist, network_type=osm_network_type)
+                    except Exception as e:
+                        st.error(f"OSM 路網拓撲下載失敗: {e}\n請確認您是否連線網際網路，或是中心點座標在 OSM 覆蓋範圍內。")
+                        st.stop()
+
+                with st.spinner("正在進行最短路徑演算法 (Dijkstra) 計算..."):
+                    try:
+                        # 2. Find nearest node to start/end
+                        start_node = ox.nearest_nodes(G, start_lng, start_lat)
+                        end_node = ox.nearest_nodes(G, end_lng, end_lat)
+                        
+                        # 3. Calculate shortest path using length weight
+                        path_nodes = nx.shortest_path(G, start_node, end_node, weight="length")
+                        
+                        # 4. Extract path coordinates
+                        path_coords = [[G.nodes[node]['y'], G.nodes[node]['x']] for node in path_nodes]
+                        
+                        # Calculate total distance
+                        total_dist_meters = sum(
+                            get_dist(
+                                G.nodes[path_nodes[i]]['y'], G.nodes[path_nodes[i]]['x'],
+                                G.nodes[path_nodes[i+1]]['y'], G.nodes[path_nodes[i+1]]['x']
+                            ) for i in range(len(path_nodes)-1)
+                        )
+                        
+                        # Estimate travel duration
+                        speed_mps = 11.1
+                        if mode_choice[0] == "walk":
+                            speed_mps = 1.34
+                        elif mode_choice[0] == "bike":
+                            speed_mps = 4.17
+                        
+                        duration_seconds = total_dist_meters / speed_mps
+                        
+                        st.success("🎉 路網計算完成！")
+                        
+                        # Show stats
+                        stat_col1, stat_col2 = st.columns(2)
+                        with stat_col1:
+                            st.metric("📏 總規劃距離", f"{round(total_dist_meters, 1)} 公尺")
+                        with stat_col2:
+                            mins = round(duration_seconds / 60, 1)
+                            st.metric("⏳ 預估時間", f"{mins} 分鐘")
+                        
+                        # Convert coordinates to simple dataframe for rendering
+                        df_points = pd.DataFrame(path_coords, columns=["lat", "lon"])
+                        st.map(df_points, zoom=14)
+                        
+                        # Prepare data payload for saving
+                        analysis_name = f"{start_addr} 至 {end_addr} ({mode_choice[1].split(' ')[1]})"
+                        
+                        # Store in session state to allow uploading
+                        st.session_state["last_analysis"] = {
+                            "name": analysis_name,
+                            "start_name": start_addr,
+                            "end_name": end_addr,
+                            "mode": mode_choice[0],
+                            "coordinates": path_coords,
+                            "distance_meters": total_dist_meters,
+                            "duration_seconds": duration_seconds
+                        }
+                    except Exception as e:
+                        st.error(f"最短路徑計算失敗: {e}")
+                        st.stop()
+
+        # Upload section
+        if "last_analysis" in st.session_state:
+            curr = st.session_state["last_analysis"]
+            st.write("---")
+            st.markdown(f"**待上傳規劃**：`{curr['name']}`")
+            if st.button("💾 將此分析結果儲存並上傳至 Supabase", type="primary", width="stretch"):
+                try:
+                    res = sb.table("route_analyses").insert(curr).execute()
+                    st.success("🚀 上傳成功！React 前端地圖已即時更新載入！")
+                    # Clear session state
+                    del st.session_state["last_analysis"]
+                except Exception as e:
+                    st.error(f"上傳 Supabase 失敗: {e}\n請確認您的 database 表格 'route_analyses' 是否已成功建立。")

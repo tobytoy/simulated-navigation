@@ -6,6 +6,7 @@ create extension if not exists vector;
 -- =========================================================================
 -- 2. 清除舊資料表（若存在，以利乾淨初始化）
 -- =========================================================================
+drop table if exists route_analyses;
 drop table if exists dynamic_alerts;
 drop table if exists weather_cache;
 drop table if exists static_landmarks;
@@ -74,6 +75,19 @@ create table dynamic_alerts (
   ended_at timestamp with time zone
 );
 
+-- (6) 跨路網分析結果表 (儲存 Python OSMnx/NetworkX 計算結果)
+create table route_analyses (
+  id uuid default gen_random_uuid() primary key,
+  name varchar(255) not null,
+  start_name varchar(255) not null,
+  end_name varchar(255) not null,
+  mode varchar(50) not null,
+  coordinates jsonb not null,
+  distance_meters double precision,
+  duration_seconds double precision,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
 -- =========================================================================
 -- 4. 對動態警報描述建立 HNSW 向量索引 (pgvector 應用範例)
 --    假設我們未來使用 1536 維度之文字 Embedding (如 OpenAI text-embedding-ada-002)
@@ -88,6 +102,7 @@ create index on dynamic_alerts using hnsw (description_vector vector_cosine_ops)
 alter publication supabase_realtime add table dynamic_alerts;
 alter publication supabase_realtime add table static_segments;
 alter publication supabase_realtime add table weather_cache;
+alter publication supabase_realtime add table route_analyses;
 
 -- =========================================================================
 -- 6. 授權 Supabase API 角色 (anon, authenticated, service_role) 存取權限
