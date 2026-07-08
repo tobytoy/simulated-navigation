@@ -1,0 +1,6 @@
+{
+  "name": "台灣即時路況導航模擬器",
+  "description": "A 3D perspective web traffic navigation simulator featuring Leaflet maps, live congestion routes, accident events, and navigation HUD voice cues.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
