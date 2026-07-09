@@ -4,8 +4,8 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
+import maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import {
   Play,
   Pause,
@@ -17,6 +17,7 @@ import {
   Camera,
   Hammer,
   ChevronRight,
+  ChevronLeft,
   Gauge,
   Layers,
   Database,
@@ -61,6 +62,15 @@ import { PRESET_ROUTES, PresetRoute } from './presetRoutes';
 
 import DriverCockpit from './components/DriverCockpit';
 import { supabase } from './utils/supabaseClient';
+import sevenElevenLogo from '@/assets/icron/7eleven.svg';
+import familyMartLogo from '@/assets/icron/familymart.svg';
+import starbucksLogo from '@/assets/icron/starbucks.svg';
+import mcdonaldsLogo from '@/assets/icron/mcdonalds.svg';
+import mrtLogo from '@/assets/icron/mrt.svg';
+import hospitalLogo from '@/assets/icron/hospital.svg';
+import teslaLogo from '@/assets/icron/tesla.svg';
+import busLogo from '@/assets/icron/bus.svg';
+import ubikeLogo from '@/assets/icron/ubike.svg';
 
 export default function App() {
   // Route selection and designer states
@@ -147,19 +157,28 @@ export default function App() {
   const [lastSpeechTriggeredEventId, setLastSpeechTriggeredEventId] = useState<string>('');
   const [lastSpeechInstructionIndex, setLastSpeechInstructionIndex] = useState<number>(-1);
 
-  // Leaflet refs
+  // MapLibre GL JS refs and state
   const mapContainerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const carMarkerRef = useRef<L.Marker | null>(null);
-  const eventMarkersRef = useRef<{ [key: string]: L.Marker }>({});
-  const segmentPolylinesRef = useRef<L.Polyline[]>([]);
-  const routePolylineRef = useRef<L.Polyline | null>(null);
-  const checkpointMarkersRef = useRef<L.Marker[]>([]);
-  
-  // Route Analysis refs
-  const analysisPolylineRef = useRef<L.Polyline | null>(null);
-  const analysisStartMarkerRef = useRef<L.Marker | null>(null);
-  const analysisEndMarkerRef = useRef<L.Marker | null>(null);
+  const mapRef = useRef<maplibregl.Map | null>(null);
+  const carMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const eventMarkersRef = useRef<{ [key: string]: maplibregl.Marker }>({});
+  const checkpointMarkersRef = useRef<maplibregl.Marker[]>([]);
+  const analysisStartMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const analysisEndMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const [mapLoaded, setMapLoaded] = useState(false);
+  const [osmStatus, setOsmStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [osmPOIcount, setOsmPOIcount] = useState<number>(0);
+  const [activeLayers, setActiveLayers] = useState({
+    convenience: true,
+    coffee: true,
+    fastfood: true,
+    mrt: true,
+    bus: true,
+    ubike: true,
+    incident: true
+  });
+  const [osmPanelExpanded, setOsmPanelExpanded] = useState<boolean>(true);
+  const [consoleExpanded, setConsoleExpanded] = useState<boolean>(true);
   
   // Simulation Loop Ref
   const timerRef = useRef<any>(null);
@@ -289,8 +308,16 @@ export default function App() {
         }
         
         if (loadedEvents.length > 0) {
-          setEvents(loadedEvents);
-          addLog('info', `📡 已從 Supabase 載入 ${loadedEvents.length} 個路況事件與測速點！`);
+          setEvents(() => {
+            const merged = [...loadedEvents];
+            INITIAL_EVENTS.forEach(mockEvt => {
+              if (!merged.some(e => e.id === mockEvt.id)) {
+                merged.push(mockEvt);
+              }
+            });
+            return merged;
+          });
+          addLog('info', `📡 已從 Supabase 載入 ${loadedEvents.length} 個事件，並合併本地地標！`);
         }
 
         // 4. Fetch route analyses
@@ -454,32 +481,138 @@ export default function App() {
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
-    // Center map around MOTC building Taipei
-    const initialCenter: [number, number] = [25.0395, 121.5280];
-    const map = L.map(mapContainerRef.current, {
+    // Center map around MOTC building Taipei [lng, lat]
+    const initialCenter: [number, number] = [121.5280, 25.0395];
+    const map = new maplibregl.Map({
+      container: mapContainerRef.current,
+      style: 'https://tiles.openfreemap.org/styles/dark', // OpenFreeMap dark theme
       center: initialCenter,
-      zoom: 15,
-      zoomControl: true,
-      attributionControl: false,
+      zoom: 14.5,
+      pitch: 0,
+      bearing: 0,
+      attributionControl: false
     });
 
-    // Dark-themed tiles to make traffic colors & HUD look extremely gorgeous and high-tech
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      maxZoom: 19,
-    }).addTo(map);
+    // Add zoom/compass control
+    map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
 
     mapRef.current = map;
 
     // Log map setup
-    addLog('info', '🗺️ 數位地圖系統初始化成功：載入 Leaflet & OpenStreetMap 向量網格');
+    addLog('info', '🗺️ 數位地圖系統初始化成功：載入 MapLibre GL JS & OpenFreeMap 3D 向量圖磚');
     addTerminalLog('/api/v2/map/tiles');
 
     // Add map click handler for spawning custom events
-    map.on('click', (e: L.LeafletMouseEvent) => {
-      setCustomEventLat(e.latlng.lat);
-      setCustomEventLng(e.latlng.lng);
-      // Pre-fill some default title
+    map.on('click', (e) => {
+      setCustomEventLat(e.lngLat.lat);
+      setCustomEventLng(e.lngLat.lng);
       setCustomEventTitle('自訂交通事件');
+    });
+
+    map.on('load', () => {
+      // Find the vector source id dynamically from the style
+      const style = map.getStyle();
+      const vectorSourceId = Object.keys(style.sources).find(
+        key => style.sources[key].type === 'vector'
+      ) || 'openmaptiles';
+
+      // Add 3D extrusion buildings layer
+      if (!map.getLayer('3d-buildings')) {
+        map.addLayer({
+          id: '3d-buildings',
+          source: vectorSourceId,
+          'source-layer': 'building',
+          type: 'fill-extrusion',
+          minzoom: 14,
+          paint: {
+            'fill-extrusion-color': '#1e293b', // slate-800
+            'fill-extrusion-height': [
+              'coalesce',
+              ['get', 'render_height'],
+              ['get', 'height'],
+              ['*', ['get', 'building:levels'], 3],
+              15
+            ],
+            'fill-extrusion-base': [
+              'coalesce',
+              ['get', 'render_min_height'],
+              ['get', 'min_height'],
+              ['*', ['get', 'building:min_level'], 3],
+              0
+            ],
+            'fill-extrusion-opacity': 0.65
+          }
+        });
+      }
+
+      // Add driving route source & layer
+      if (!map.getSource('driving-route')) {
+        map.addSource('driving-route', {
+          type: 'geojson',
+          data: { type: 'FeatureCollection', features: [] }
+        });
+        map.addLayer({
+          id: 'driving-route-layer',
+          type: 'line',
+          source: 'driving-route',
+          paint: {
+            'line-color': '#3b82f6', // blue-500
+            'line-width': 5,
+            'line-opacity': 0.6,
+            'line-dasharray': [2, 2]
+          },
+          layout: {
+            'line-cap': 'round',
+            'line-join': 'round'
+          }
+        });
+      }
+
+      // Add traffic segments source & layer
+      if (!map.getSource('traffic-segments')) {
+        map.addSource('traffic-segments', {
+          type: 'geojson',
+          data: { type: 'FeatureCollection', features: [] }
+        });
+        map.addLayer({
+          id: 'traffic-segments-layer',
+          type: 'line',
+          source: 'traffic-segments',
+          paint: {
+            'line-color': ['coalesce', ['get', 'color'], '#22c55e'],
+            'line-width': ['coalesce', ['get', 'weight'], 5],
+            'line-opacity': ['coalesce', ['get', 'opacity'], 0.75]
+          },
+          layout: {
+            'line-cap': 'round',
+            'line-join': 'round'
+          }
+        });
+      }
+
+      // Add analysis route source & layer
+      if (!map.getSource('analysis-route')) {
+        map.addSource('analysis-route', {
+          type: 'geojson',
+          data: { type: 'FeatureCollection', features: [] }
+        });
+        map.addLayer({
+          id: 'analysis-route-layer',
+          type: 'line',
+          source: 'analysis-route',
+          paint: {
+            'line-color': ['coalesce', ['get', 'color'], '#a78bfa'],
+            'line-width': 6,
+            'line-opacity': 0.85
+          },
+          layout: {
+            'line-cap': 'round',
+            'line-join': 'round'
+          }
+        });
+      }
+
+      setMapLoaded(true);
     });
 
     return () => {
@@ -487,39 +620,191 @@ export default function App() {
         mapRef.current.remove();
         mapRef.current = null;
       }
+      setMapLoaded(false);
     };
   }, []);
+
+  // Automatically Fetch Real Landmarks from OpenStreetMap Overpass API on Map Move/Zoom
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    let debounceTimer: any = null;
+
+    const fetchOsmPOIs = async () => {
+      const zoom = map.getZoom();
+      // Only query when zoomed in enough to prevent massive responses (block rate limits)
+      if (zoom < 14.5) {
+        setOsmStatus('idle');
+        return;
+      }
+
+      setOsmStatus('loading');
+
+      const bounds = map.getBounds();
+      const south = bounds.getSouth();
+      const west = bounds.getWest();
+      const north = bounds.getNorth();
+      const east = bounds.getEast();
+
+      // Overpass QL Query for convenience stores, cafes, fast food, hospitals, MRT stations, charging stations, bus stops, YouBike
+      const query = `
+        [out:json][timeout:25];
+        (
+          node["shop"="convenience"](${south},${west},${north},${east});
+          node["amenity"="cafe"]["name"~"Starbucks|星巴克"](${south},${west},${north},${east});
+          node["amenity"="fast_food"]["name"~"McDonald's|麥當勞"](${south},${west},${north},${east});
+          node["amenity"="hospital"](${south},${west},${north},${east});
+          node["railway"="station"]["subway"="yes"](${south},${west},${north},${east});
+          node["railway"="station"]["name"~"捷運"](${south},${west},${north},${east});
+          node["amenity"="charging_station"](${south},${west},${north},${east});
+          node["highway"="bus_stop"](${south},${west},${north},${east});
+          node["amenity"="bicycle_rental"](${south},${west},${north},${east});
+        );
+        out body;
+      `;
+
+      try {
+        const response = await fetch('https://overpass-api.de/api/interpreter', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: `data=${encodeURIComponent(query)}`
+        });
+
+        if (!response.ok) throw new Error('Overpass API query failed');
+        const data = await response.json();
+
+        if (data && data.elements) {
+          setOsmPOIcount(data.elements.length);
+          setOsmStatus('success');
+
+          const newOsmEvents: TrafficEvent[] = data.elements.map((el: any) => {
+            const name = el.tags.name || el.tags.operator || '未知店家';
+            let type: any = 'poi';
+            let title = name;
+            let description = '';
+
+            // Categorize OSM tags to match our system's SVG logos and styles
+            if (el.tags.shop === 'convenience') {
+              if (name.includes('7-Eleven') || name.includes('7-11') || name.includes('統一超商')) {
+                title = '7-Eleven ' + (el.tags.branch || '');
+                description = '即時同步自 OpenStreetMap 的 7-Eleven 便利商店。';
+              } else if (name.includes('全家') || name.includes('FamilyMart')) {
+                title = '全家便利商店 ' + (el.tags.branch || '');
+                description = '即時同步自 OpenStreetMap 的全家便利商店。';
+              } else {
+                title = name.includes('超商') || name.includes('便利商店') ? name : `${name} (便利商店)`;
+                description = '即時同步自 OpenStreetMap 的便利商店。';
+              }
+            } else if (el.tags.amenity === 'cafe') {
+              description = '即時同步自 OpenStreetMap 的星巴克門市。';
+            } else if (el.tags.amenity === 'fast_food') {
+              description = '即時同步自 OpenStreetMap 的麥當勞餐廳。';
+            } else if (el.tags.amenity === 'hospital') {
+              description = '即時同步自 OpenStreetMap 的醫療機構點位。';
+            } else if (el.tags.railway === 'station') {
+              description = '即時同步自 OpenStreetMap 的捷運地鐵站。';
+            } else if (el.tags.amenity === 'charging_station') {
+              description = '即時同步自 OpenStreetMap 的電動車充電站點。';
+            } else if (el.tags.highway === 'bus_stop') {
+              description = '即時同步自 OpenStreetMap 的公車停靠站。';
+            } else if (el.tags.amenity === 'bicycle_rental') {
+              title = name.includes('YouBike') ? name : `YouBike 2.0 ${name}`;
+              description = '即時同步自 OpenStreetMap 的 YouBike 共享單車租借站。';
+            }
+
+            return {
+              id: `osm_${el.id}`,
+              type: 'poi',
+              title: title.trim(),
+              description: description || `位於 ${el.tags.street || '路邊'} 的大眾地標。`,
+              lat: el.lat,
+              lng: el.lon,
+              roadName: el.tags['addr:street'] || el.tags.street || '地圖範圍內路段',
+              severity: 'low',
+              createdAt: new Date().toLocaleTimeString('zh-TW', { hour12: false })
+            };
+          });
+
+          if (newOsmEvents.length > 0) {
+            setEvents(prev => {
+              const merged = [...prev];
+              newOsmEvents.forEach(osmEvt => {
+                if (!merged.some(e => e.id === osmEvt.id)) {
+                  merged.push(osmEvt);
+                }
+              });
+              return merged;
+            });
+            addLog('info', `📡 [OSM 即時地圖] 已自動抓取當前視區內 ${newOsmEvents.length} 個真實地標點位！`);
+          }
+        } else {
+          setOsmPOIcount(0);
+          setOsmStatus('success');
+        }
+      } catch (err) {
+        setOsmStatus('error');
+        console.error('Failed to fetch OSM POIs:', err);
+      }
+    };
+
+    const handleMapMove = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        fetchOsmPOIs();
+      }, 600);
+    };
+
+    // Run initial fetch on mount/load
+    fetchOsmPOIs();
+
+    // Register movement end and zoom end listeners
+    map.on('moveend', handleMapMove);
+    map.on('zoomend', handleMapMove);
+
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      map.off('moveend', handleMapMove);
+      map.off('zoomend', handleMapMove);
+    };
+  }, [mapLoaded]);
 
   // Sync / Draw Route Path
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapLoaded) return;
 
-    // Clear old route polyline if any
-    if (routePolylineRef.current) {
-      routePolylineRef.current.remove();
+    const source = map.getSource('driving-route') as maplibregl.GeoJSONSource;
+    if (source) {
+      source.setData({
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'LineString',
+          coordinates: routePoints.map(p => [p.lng, p.lat])
+        }
+      });
     }
 
-    // Draw high resolution driving route (dotted semi-transparent path)
-    const latlngs = routePoints.map(p => L.latLng(p.lat, p.lng));
-    const polyline = L.polyline(latlngs, {
-      color: '#3b82f6',
-      weight: 4,
-      opacity: 0.4,
-      dashArray: '8, 8'
-    }).addTo(map);
-
-    routePolylineRef.current = polyline;
-
     // Set map bounds to fit the route on first load
-    map.fitBounds(polyline.getBounds(), { padding: [30, 30] });
-
-  }, [routePoints]);
+    if (routePoints.length > 0) {
+      const lngs = routePoints.map(p => p.lng);
+      const lats = routePoints.map(p => p.lat);
+      const minLng = Math.min(...lngs);
+      const maxLng = Math.max(...lngs);
+      const minLat = Math.min(...lats);
+      const maxLat = Math.max(...lats);
+      
+      map.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 40 });
+    }
+  }, [routePoints, mapLoaded]);
 
   // Sync / Draw Route Checkpoints Markers
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapLoaded) return;
 
     // Clear previous checkpoint markers
     checkpointMarkersRef.current.forEach(m => m.remove());
@@ -541,90 +826,117 @@ export default function App() {
         textChar = 'E';
       }
 
-      const htmlContent = `
+      const el = document.createElement('div');
+      el.className = 'custom-checkpoint-icon';
+      el.innerHTML = `
         <div class="relative flex items-center justify-center w-6 h-6 rounded-full ${badgeColor} border-2 text-white font-bold text-[10px] font-mono shadow-md hover:scale-115 transition-all cursor-pointer">
           ${textChar}
         </div>
       `;
 
-      const markerIcon = L.divIcon({
-        className: 'custom-checkpoint-icon',
-        html: htmlContent,
-        iconSize: [24, 24],
-        iconAnchor: [12, 12]
-      });
+      const popup = new maplibregl.Popup({ offset: 12, closeButton: false })
+        .setHTML(`
+          <div class="p-2 font-sans text-xs bg-gray-950 text-slate-100 rounded border border-slate-800">
+            <p class="font-bold text-white border-b border-slate-800 pb-1 mb-1">📍 節點 ${idx + 1}：${cp.streetName}</p>
+            <p class="text-slate-400 mb-0.5">速限: <span class="font-mono text-sky-400 font-bold">${cp.speedLimit} km/h</span></p>
+            <p class="text-slate-300 leading-normal">${cp.instruction}</p>
+          </div>
+        `);
 
-      const marker = L.marker([cp.lat, cp.lng], { icon: markerIcon }).addTo(map);
-
-      marker.bindPopup(`
-        <div class="p-2 font-sans text-xs bg-gray-950 text-slate-100 rounded border border-slate-800">
-          <p class="font-bold text-white border-b border-slate-800 pb-1 mb-1">📍 節點 ${idx + 1}：${cp.streetName}</p>
-          <p class="text-slate-400 mb-0.5">速限: <span class="font-mono text-sky-400 font-bold">${cp.speedLimit} km/h</span></p>
-          <p class="text-slate-300 leading-normal">${cp.instruction}</p>
-        </div>
-      `, { closeButton: false });
+      const marker = new maplibregl.Marker({ element: el })
+        .setLngLat([cp.lng, cp.lat])
+        .setPopup(popup)
+        .addTo(map);
 
       return marker;
     });
 
     checkpointMarkersRef.current = newMarkers;
 
-  }, [checkpoints]);
+  }, [checkpoints, mapLoaded]);
 
   // Sync / Draw Traffic Congestion Segments
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapLoaded) return;
 
-    // Clear previous polylines
-    segmentPolylinesRef.current.forEach(p => p.remove());
-    segmentPolylinesRef.current = [];
+    const source = map.getSource('traffic-segments') as maplibregl.GeoJSONSource;
+    if (source) {
+      source.setData({
+        type: 'FeatureCollection',
+        features: trafficSegments.map(seg => {
+          let color = '#22c55e'; // smooth green
+          let weight = 5;
+          let opacity = 0.75;
+          let statusText = '暢通';
 
-    // Draw each segment with speed colors
-    const newPolylines = trafficSegments.map(seg => {
-      let color = '#22c55e'; // smooth green
-      let weight = 5;
-      let opacity = 0.75;
+          if (seg.status === 'heavy') {
+            color = '#eab308'; // heavy yellow
+            weight = 7;
+            statusText = '車多擁擠';
+          } else if (seg.status === 'jammed') {
+            color = '#ef4444'; // jammed red
+            weight = 8;
+            opacity = 0.9;
+            statusText = '極度塞車';
+          }
 
-      if (seg.status === 'heavy') {
-        color = '#eab308'; // heavy yellow
-        weight = 7;
-      } else if (seg.status === 'jammed') {
-        color = '#ef4444'; // jammed red
-        weight = 8;
-        opacity = 0.9;
-      }
-
-      const poly = L.polyline(seg.coordinates, {
-        color,
-        weight,
-        opacity,
-        lineCap: 'round',
-        lineJoin: 'round',
-      }).addTo(map);
-
-      // Create a nice popup with road details
-      poly.bindPopup(`
-        <div class="p-1 font-sans text-xs bg-gray-900 text-white rounded">
-          <p class="font-bold border-b border-gray-700 pb-1 mb-1">${seg.name}</p>
-          <p>道路速限: <span class="font-mono text-emerald-400 font-bold">${seg.speedLimit} km/h</span></p>
-          <p>當前均速: <span class="font-mono text-yellow-400 font-bold">${seg.averageSpeed} km/h</span></p>
-          <p>路況狀態: <span class="font-bold" style="color: ${color}">${seg.status === 'smooth' ? '暢通' : seg.status === 'heavy' ? '車多擁擠' : '極度塞車'}</span></p>
-        </div>
-      `, { closeButton: false });
-
-      return poly;
-    });
-
-    segmentPolylinesRef.current = newPolylines;
+          return {
+            type: 'Feature',
+            properties: {
+              name: seg.name,
+              speedLimit: seg.speedLimit,
+              averageSpeed: seg.averageSpeed,
+              statusText,
+              color,
+              weight,
+              opacity
+            },
+            geometry: {
+              type: 'LineString',
+              // Coordinates in segments are stored as [lat, lng], maplibre needs [lng, lat]
+              coordinates: seg.coordinates.map(c => [c[1], c[0]])
+            }
+          };
+        })
+      });
+    }
     addTerminalLog('/api/v2/traffic/segments');
 
-  }, [trafficSegments]);
+  }, [trafficSegments, mapLoaded]);
 
   // Sync / Draw Event Markers
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapLoaded) return;
+
+    const checkVisibility = (evt: TrafficEvent, currentZoom: number) => {
+      let isVisible = true;
+      if (evt.title.includes('7-Eleven') || evt.title.includes('全家') || evt.title.includes('便利商店')) {
+        isVisible = activeLayers.convenience;
+      } else if (evt.title.includes('星巴克') || evt.title.includes('Starbucks')) {
+        isVisible = activeLayers.coffee;
+      } else if (evt.title.includes('麥當勞')) {
+        isVisible = activeLayers.fastfood;
+      } else if (evt.title.includes('捷運') || evt.title.includes('MRT')) {
+        isVisible = activeLayers.mrt;
+      } else if (evt.title.includes('YouBike')) {
+        isVisible = activeLayers.ubike;
+      } else if (evt.title.includes('公車')) {
+        isVisible = activeLayers.bus;
+      } else {
+        isVisible = activeLayers.incident;
+      }
+
+      if (isVisible) {
+        if (evt.title.includes('YouBike') || evt.title.includes('公車')) {
+          isVisible = currentZoom >= 16;
+        } else if (evt.title.includes('7-Eleven') || evt.title.includes('全家') || evt.title.includes('便利商店') || evt.title.includes('星巴克') || evt.title.includes('麥當勞')) {
+          isVisible = currentZoom >= 14.8;
+        }
+      }
+      return isVisible;
+    };
 
     // Clear removed markers
     Object.keys(eventMarkersRef.current).forEach(id => {
@@ -682,53 +994,246 @@ export default function App() {
       const pulsePing = evt.severity === 'high' ? 
         `<div class="absolute inset-0 rounded-full ${pingClass} opacity-40 animate-ping"></div>` : '';
 
-      const htmlContent = `
+      let htmlContent = `
         <div class="relative flex items-center justify-center w-8 h-8 rounded-full ${bgClass} border-2 border-white text-white shadow-xl">
           ${pulsePing}
           <span class="text-sm font-mono flex items-center justify-center">${iconChar}</span>
         </div>
       `;
 
-      const customIcon = L.divIcon({
-        className: 'custom-traffic-icon',
-        html: htmlContent,
-        iconSize: [32, 32],
-        iconAnchor: [16, 16],
-      });
+      let anchor: maplibregl.PositionAnchor = 'center';
+      let poiTypeLabel = '路況警報';
+      let customIconChar = iconChar;
+
+      if (evt.type === 'accident') poiTypeLabel = '車禍事故';
+      if (evt.type === 'construction') poiTypeLabel = '道路施工';
+      if (evt.type === 'speed_camera') poiTypeLabel = '測速照相';
+      if (evt.type === 'flooding') poiTypeLabel = '道路積水';
+      if (evt.type === 'road_closure') poiTypeLabel = '道路封閉';
+      if (evt.type === 'landmark') poiTypeLabel = '著名地標';
+      if (evt.type === 'parking') poiTypeLabel = '停車場';
+
+      if (evt.type === 'poi') {
+        poiTypeLabel = '地標 POI';
+        if (evt.title.includes('7-Eleven')) {
+          anchor = 'bottom';
+          poiTypeLabel = '便利商店';
+          customIconChar = '🏪';
+          htmlContent = `
+            <div class="relative flex flex-col items-center group cursor-pointer">
+              <!-- Glow Aura -->
+              <div class="absolute inset-0 bg-[#008060]/30 rounded-full blur-md animate-pulse"></div>
+              <!-- Pin Circle -->
+              <div class="w-10 h-10 rounded-full bg-white border-2 border-[#008060] flex items-center justify-center shadow-[0_0_15px_rgba(0,128,96,0.75)] group-hover:scale-115 transition-transform duration-200 relative z-10 overflow-hidden p-1.5">
+                <img src="${sevenElevenLogo}" class="w-full h-full object-contain select-none pointer-events-none" />
+              </div>
+              <!-- Pin Pointer -->
+              <div class="w-3 h-3 bg-white border-r-2 border-b-2 border-[#008060] rotate-45 -mt-[7px] relative z-0 shadow-md"></div>
+            </div>
+          `;
+        } else if (evt.title.includes('全家')) {
+          anchor = 'bottom';
+          poiTypeLabel = '便利商店';
+          customIconChar = '🏪';
+          htmlContent = `
+            <div class="relative flex flex-col items-center group cursor-pointer">
+              <!-- Glow Aura -->
+              <div class="absolute inset-0 bg-[#00A0E9]/30 rounded-full blur-md animate-pulse"></div>
+              <!-- Pin Circle -->
+              <div class="w-10 h-10 rounded-full bg-white border-2 border-[#00A0E9] flex items-center justify-center shadow-[0_0_15px_rgba(0,160,233,0.75)] group-hover:scale-115 transition-transform duration-200 relative z-10 overflow-hidden p-1">
+                <img src="${familyMartLogo}" class="w-full h-full object-contain select-none pointer-events-none" />
+              </div>
+              <!-- Pin Pointer -->
+              <div class="w-3 h-3 bg-white border-r-2 border-b-2 border-[#00A0E9] rotate-45 -mt-[7px] relative z-0 shadow-md"></div>
+            </div>
+          `;
+        } else if (evt.title.includes('星巴克')) {
+          anchor = 'bottom';
+          poiTypeLabel = '咖啡廳';
+          customIconChar = '☕';
+          htmlContent = `
+            <div class="relative flex flex-col items-center group cursor-pointer">
+              <!-- Glow Aura -->
+              <div class="absolute inset-0 bg-[#00704A]/30 rounded-full blur-md animate-pulse"></div>
+              <!-- Pin Circle -->
+              <div class="w-10 h-10 rounded-full bg-white border-2 border-[#00704A] flex items-center justify-center shadow-[0_0_15px_rgba(0,112,74,0.75)] group-hover:scale-115 transition-transform duration-200 relative z-10 overflow-hidden p-1">
+                <img src="${starbucksLogo}" class="w-full h-full object-contain select-none pointer-events-none" />
+              </div>
+              <!-- Pin Pointer -->
+              <div class="w-3 h-3 bg-white border-r-2 border-b-2 border-[#00704A] rotate-45 -mt-[7px] relative z-0 shadow-md"></div>
+            </div>
+          `;
+        } else if (evt.title.includes('麥當勞')) {
+          anchor = 'bottom';
+          poiTypeLabel = '速食餐廳';
+          customIconChar = '🍔';
+          htmlContent = `
+            <div class="relative flex flex-col items-center group cursor-pointer">
+              <!-- Glow Aura -->
+              <div class="absolute inset-0 bg-[#DA291C]/30 rounded-full blur-md animate-pulse"></div>
+              <!-- Pin Circle -->
+              <div class="w-10 h-10 rounded-full bg-white border-2 border-[#DA291C] flex items-center justify-center shadow-[0_0_15px_rgba(218,41,28,0.75)] group-hover:scale-115 transition-transform duration-200 relative z-10 overflow-hidden p-1">
+                <img src="${mcdonaldsLogo}" class="w-full h-full object-contain select-none pointer-events-none" />
+              </div>
+              <!-- Pin Pointer -->
+              <div class="w-3 h-3 bg-white border-r-2 border-b-2 border-[#DA291C] rotate-45 -mt-[7px] relative z-0 shadow-md"></div>
+            </div>
+          `;
+        } else if (evt.title.includes('醫院')) {
+          anchor = 'bottom';
+          poiTypeLabel = '醫療機構';
+          customIconChar = '🏥';
+          htmlContent = `
+            <div class="relative flex flex-col items-center group cursor-pointer">
+              <!-- Glow Aura -->
+              <div class="absolute inset-0 bg-[#005BAC]/30 rounded-full blur-md animate-pulse"></div>
+              <!-- Pin Circle -->
+              <div class="w-10 h-10 rounded-full bg-white border-2 border-[#005BAC] flex items-center justify-center shadow-[0_0_15px_rgba(0,91,172,0.75)] group-hover:scale-115 transition-transform duration-200 relative z-10 overflow-hidden p-1.5">
+                <img src="${hospitalLogo}" class="w-full h-full object-contain select-none pointer-events-none" />
+              </div>
+              <!-- Pin Pointer -->
+              <div class="w-3 h-3 bg-white border-r-2 border-b-2 border-[#005BAC] rotate-45 -mt-[7px] relative z-0 shadow-md"></div>
+            </div>
+          `;
+        } else if (evt.title.includes('捷運')) {
+          anchor = 'bottom';
+          poiTypeLabel = '捷運地鐵站';
+          customIconChar = '🚇';
+          htmlContent = `
+            <div class="relative flex flex-col items-center group cursor-pointer">
+              <!-- Glow Aura -->
+              <div class="absolute inset-0 bg-[#0070BD]/30 rounded-full blur-md animate-pulse"></div>
+              <!-- Pin Circle -->
+              <div class="w-10 h-10 rounded-full bg-white border-2 border-[#0070BD] flex items-center justify-center shadow-[0_0_15px_rgba(0,112,189,0.75)] group-hover:scale-115 transition-transform duration-200 relative z-10 overflow-hidden p-1">
+                <img src="${mrtLogo}" class="w-full h-full object-contain select-none pointer-events-none" />
+              </div>
+              <!-- Pin Pointer -->
+              <div class="w-3 h-3 bg-white border-r-2 border-b-2 border-[#0070BD] rotate-45 -mt-[7px] relative z-0 shadow-md"></div>
+            </div>
+          `;
+        } else if (evt.title.includes('Tesla') || evt.title.includes('充電')) {
+          anchor = 'bottom';
+          poiTypeLabel = '電動車充電站';
+          customIconChar = '⚡';
+          htmlContent = `
+            <div class="relative flex flex-col items-center group cursor-pointer">
+              <!-- Glow Aura -->
+              <div class="absolute inset-0 bg-[#E82127]/30 rounded-full blur-md animate-pulse"></div>
+              <!-- Pin Circle -->
+              <div class="w-10 h-10 rounded-full bg-white border-2 border-[#E82127] flex items-center justify-center shadow-[0_0_15px_rgba(232,33,39,0.75)] group-hover:scale-115 transition-transform duration-200 relative z-10 overflow-hidden p-1.5">
+                <img src="${teslaLogo}" class="w-full h-full object-contain select-none pointer-events-none" />
+              </div>
+              <!-- Pin Pointer -->
+              <div class="w-3 h-3 bg-white border-r-2 border-b-2 border-[#E82127] rotate-45 -mt-[7px] relative z-0 shadow-md"></div>
+            </div>
+          `;
+        } else if (evt.title.includes('YouBike')) {
+          anchor = 'bottom';
+          poiTypeLabel = '共享單車站 (YouBike)';
+          customIconChar = '🚲';
+          htmlContent = `
+            <div class="relative flex flex-col items-center group cursor-pointer">
+              <!-- Glow Aura -->
+              <div class="absolute inset-0 bg-[#FFB300]/30 rounded-full blur-md animate-pulse"></div>
+              <!-- Pin Circle -->
+              <div class="w-10 h-10 rounded-full bg-white border-2 border-[#FFB300] flex items-center justify-center shadow-[0_0_15px_rgba(255,179,0,0.75)] group-hover:scale-115 transition-transform duration-200 relative z-10 overflow-hidden p-1">
+                <img src="${ubikeLogo}" class="w-full h-full object-contain select-none pointer-events-none" />
+              </div>
+              <!-- Pin Pointer -->
+              <div class="w-3 h-3 bg-white border-r-2 border-b-2 border-[#FFB300] rotate-45 -mt-[7px] relative z-0 shadow-md"></div>
+            </div>
+          `;
+        } else if (evt.title.includes('公車')) {
+          anchor = 'bottom';
+          poiTypeLabel = '公車停靠站';
+          customIconChar = '🚌';
+          htmlContent = `
+            <div class="relative flex flex-col items-center group cursor-pointer">
+              <!-- Glow Aura -->
+              <div class="absolute inset-0 bg-[#3B82F6]/30 rounded-full blur-md animate-pulse"></div>
+              <!-- Pin Circle -->
+              <div class="w-10 h-10 rounded-full bg-white border-2 border-[#3B82F6] flex items-center justify-center shadow-[0_0_15px_rgba(59,130,246,0.75)] group-hover:scale-115 transition-transform duration-200 relative z-10 overflow-hidden p-1.5">
+                <img src="${busLogo}" class="w-full h-full object-contain select-none pointer-events-none" />
+              </div>
+              <!-- Pin Pointer -->
+              <div class="w-3 h-3 bg-white border-r-2 border-b-2 border-[#3B82F6] rotate-45 -mt-[7px] relative z-0 shadow-md"></div>
+            </div>
+          `;
+        }
+      }
 
       if (existingMarker) {
-        existingMarker.setLatLng([evt.lat, evt.lng]);
-        existingMarker.setIcon(customIcon);
+        existingMarker.setLngLat([evt.lng, evt.lat]);
       } else {
-        const marker = L.marker([evt.lat, evt.lng], { icon: customIcon }).addTo(map);
-        
-        marker.bindPopup(`
-          <div class="p-2 font-sans text-xs bg-gray-900 text-slate-100 rounded max-w-xs">
-            <div class="flex items-center gap-1 border-b border-gray-700 pb-1 mb-1">
-              <span class="text-base">${iconChar}</span>
-              <p class="font-bold text-white text-sm">${evt.title}</p>
+        const el = document.createElement('div');
+        el.className = 'custom-traffic-icon';
+        el.innerHTML = htmlContent;
+
+        const popupOffset = anchor === 'bottom' ? 32 : 16;
+        const popup = new maplibregl.Popup({ offset: popupOffset, closeButton: false })
+          .setHTML(`
+            <div class="p-2 font-sans text-xs bg-gray-900 text-slate-100 rounded max-w-xs">
+              <div class="flex items-center gap-1 border-b border-gray-700 pb-1 mb-1">
+                <span class="text-base">${customIconChar}</span>
+                <p class="font-bold text-white text-sm">${evt.title}</p>
+              </div>
+              <p class="text-slate-300 font-medium mb-1">${evt.roadName}</p>
+              <p class="text-slate-400 leading-relaxed">${evt.description}</p>
+              <div class="mt-2 flex items-center justify-between text-[10px] text-slate-500">
+                <span>類型: <strong class="text-sky-400">${poiTypeLabel}</strong></span>
+                <span>${evt.createdAt}</span>
+              </div>
             </div>
-            <p class="text-slate-300 font-medium mb-1">${evt.roadName}</p>
-            <p class="text-slate-400 leading-relaxed">${evt.description}</p>
-            <div class="mt-2 flex items-center justify-between text-[10px] text-slate-500">
-              <span>威脅等級: <strong class="${evt.severity === 'high' ? 'text-red-400' : 'text-amber-400'}">${evt.severity.toUpperCase()}</strong></span>
-              <span>${evt.createdAt}</span>
-            </div>
-          </div>
-        `, { closeButton: false });
+          `);
+
+        const marker = new maplibregl.Marker({ element: el, anchor })
+          .setLngLat([evt.lng, evt.lat])
+          .setPopup(popup)
+          .addTo(map);
 
         eventMarkersRef.current[evt.id] = marker;
       }
+
+      // Determine initial visibility
+      const markerInstance = eventMarkersRef.current[evt.id];
+      if (markerInstance) {
+        const isVisible = checkVisibility(evt, map.getZoom());
+        const markerEl = markerInstance.getElement();
+        if (markerEl) {
+          markerEl.style.display = isVisible ? 'block' : 'none';
+        }
+      }
     });
+
+    // Listen to zoom changes to show/hide dense POIs dynamically
+    const handleZoomChange = () => {
+      const currentZoom = map.getZoom();
+      events.forEach(evt => {
+        const markerInstance = eventMarkersRef.current[evt.id];
+        if (markerInstance) {
+          const isVisible = checkVisibility(evt, currentZoom);
+          const markerEl = markerInstance.getElement();
+          if (markerEl) {
+            markerEl.style.display = isVisible ? 'block' : 'none';
+          }
+        }
+      });
+    };
+
+    map.on('zoom', handleZoomChange);
 
     addTerminalLog('/api/v2/traffic/events');
 
-  }, [events]);
+    return () => {
+      map.off('zoom', handleZoomChange);
+    };
+
+  }, [events, mapLoaded, activeLayers]);
 
   // Main Vehicle Position Sync Loop
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapLoaded) return;
 
     const currentPoint = routePoints[nav.currentPointIndex];
     if (!currentPoint) return;
@@ -740,49 +1245,68 @@ export default function App() {
       heading = getHeading(currentPoint.lat, currentPoint.lng, nextPoint.lat, nextPoint.lng);
     }
 
-    // Vehicle Marker Icon: Elegant directional blue arrows with radar sonar ring
-    const carIconHtml = `
-      <div class="relative flex items-center justify-center w-12 h-12">
-        <div class="absolute inset-0 bg-sky-500 rounded-full opacity-30 animate-ping"></div>
-        <div class="relative bg-sky-600 text-white rounded-full p-2 border-2 border-white shadow-2xl flex items-center justify-center transition-transform duration-300" 
-             style="transform: rotate(${heading}deg);">
-          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 2L4.5 20.29L5.21 21L12 18L18.79 21L19.5 20.29L12 2Z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>
-          </svg>
-        </div>
-      </div>
-    `;
-
-    const carIcon = L.divIcon({
-      className: 'car-vehicle-marker',
-      html: carIconHtml,
-      iconSize: [48, 48],
-      iconAnchor: [24, 24],
-    });
-
     if (carMarkerRef.current) {
-      carMarkerRef.current.setLatLng([currentPoint.lat, currentPoint.lng]);
-      carMarkerRef.current.setIcon(carIcon);
+      carMarkerRef.current.setLngLat([currentPoint.lng, currentPoint.lat]);
+      // Rotate the arrow inside the DOM element
+      const el = carMarkerRef.current.getElement();
+      const arrowEl = el.querySelector('.relative.bg-sky-600') as HTMLElement;
+      if (arrowEl) {
+        arrowEl.style.transform = `rotate(${heading}deg)`;
+      }
     } else {
-      carMarkerRef.current = L.marker([currentPoint.lat, currentPoint.lng], { icon: carIcon, zIndexOffset: 1000 }).addTo(map);
+      const el = document.createElement('div');
+      el.className = 'car-vehicle-marker';
+      el.innerHTML = `
+        <div class="relative flex items-center justify-center w-12 h-12">
+          <div class="absolute inset-0 bg-sky-500 rounded-full opacity-30 animate-ping"></div>
+          <div class="relative bg-sky-600 text-white rounded-full p-2 border-2 border-white shadow-2xl flex items-center justify-center transition-transform duration-300" 
+               style="transform: rotate(${heading}deg);">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 2L4.5 20.29L5.21 21L12 18L18.79 21L19.5 20.29L12 2Z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>
+            </svg>
+          </div>
+        </div>
+      `;
+      carMarkerRef.current = new maplibregl.Marker({ element: el })
+        .setLngLat([currentPoint.lng, currentPoint.lat])
+        .addTo(map);
     }
 
-    // Centering behaviors
-    // In driving mode, we center map around the car.
-    // If Tilt / Heading mode is on, we tilt map pane.
+    // Centering and camera behaviors
     if (nav.isDriving && !nav.isPaused) {
-      map.panTo([currentPoint.lat, currentPoint.lng], { animate: true, duration: 0.1 });
+      const targetPitch = viewMode === 'driver' ? 65 : viewMode === '3d' ? 55 : 0;
+      const targetBearing = viewMode === '2d' ? 0 : heading;
+      const targetZoom = viewMode === 'driver' ? 16.5 : viewMode === '3d' ? 15.5 : 14.5;
+
+      map.easeTo({
+        center: [currentPoint.lng, currentPoint.lat],
+        pitch: targetPitch,
+        bearing: targetBearing,
+        zoom: targetZoom,
+        duration: 300,
+        easing: (t) => t // linear for smooth transition tracking
+      });
     }
 
-    // Compute Nearest Event and trigger alerts
+    // Compute Nearest Event and trigger alerts (only counting items in front of the car)
     let minDistance = Infinity;
     let closest: TrafficEvent | null = null;
 
     events.forEach(evt => {
       const dist = getDistance(currentPoint.lat, currentPoint.lng, evt.lat, evt.lng);
-      if (dist < minDistance) {
-        minDistance = dist;
-        closest = evt;
+      
+      // Calculate bearing from vehicle to POI
+      const eventBearing = getHeading(currentPoint.lat, currentPoint.lng, evt.lat, evt.lng);
+      // Calculate relative angle difference (-180 to 180 degrees)
+      const angleDiff = (eventBearing - heading + 540) % 360 - 180;
+
+      // Only warn about events/POIs that are in front of the vehicle (within 90 degrees left/right)
+      // or if they are extremely close (under 20 meters) to handle instant passing moments smoothly.
+      if (Math.abs(angleDiff) <= 90 || dist < 20) {
+        if (dist < minDistance) {
+          minDistance = dist;
+          closest = evt;
+        }
       }
     });
 
@@ -842,7 +1366,7 @@ export default function App() {
       }
     }
 
-  }, [nav.currentPointIndex, events]);
+  }, [nav.currentPointIndex, events, viewMode, mapLoaded]);
 
   // Simulation Ticker
   useEffect(() => {
@@ -944,19 +1468,16 @@ export default function App() {
     };
   }, [nav.isDriving, nav.isPaused, nav.simSpeedMultiplier, trafficSegments, events]);
 
-  // Apply tilt rotation styling on Leaflet Map Element directly
+  // Apply visual border styling and adjust camera on view mode change
   useEffect(() => {
     const mapContainer = mapContainerRef.current;
     if (!mapContainer) return;
 
     if (viewMode === '3d') {
-      // Create a gorgeous tilted 3D HUD visual view with css transforms
-      mapContainer.style.transform = 'perspective(900px) rotateX(50deg) translateY(-20px)';
-      mapContainer.style.transformOrigin = 'center bottom';
+      mapContainer.style.transform = 'none'; // No CSS distortion anymore, MapLibre handles native 3D!
       mapContainer.style.borderRadius = '1rem';
       mapContainer.style.boxShadow = '0 25px 50px -12px rgba(0, 0, 0, 0.7)';
     } else if (viewMode === 'driver') {
-      // Small PIP map inside the cockpit, no 3D distortion
       mapContainer.style.transform = 'none';
       mapContainer.style.borderRadius = '0.75rem';
       mapContainer.style.boxShadow = 'none';
@@ -967,34 +1488,36 @@ export default function App() {
     }
     mapContainer.style.transition = 'all 0.6s cubic-bezier(0.16, 1, 0.3, 1)';
 
-    // Refresh map viewport because dimensions changed visual boundaries
+    // Trigger map resize & center easing
     setTimeout(() => {
-      if (mapRef.current) {
-        mapRef.current.invalidateSize();
+      const map = mapRef.current;
+      if (map && mapLoaded) {
+        map.resize();
         const currentPoint = routePoints[nav.currentPointIndex];
         if (currentPoint) {
-          mapRef.current.panTo([currentPoint.lat, currentPoint.lng], { animate: true });
-          if (viewMode === 'driver') {
-            mapRef.current.setZoom(16, { animate: true });
-          } else {
-            mapRef.current.setZoom(15, { animate: true });
-          }
+          const targetPitch = viewMode === 'driver' ? 65 : viewMode === '3d' ? 55 : 0;
+          const targetBearing = viewMode === '2d' ? 0 : nav.heading;
+          const targetZoom = viewMode === 'driver' ? 16.5 : viewMode === '3d' ? 15.5 : 14.5;
+          
+          map.easeTo({
+            center: [currentPoint.lng, currentPoint.lat],
+            pitch: targetPitch,
+            bearing: targetBearing,
+            zoom: targetZoom,
+            duration: 600
+          });
         }
       }
     }, 600);
 
-  }, [viewMode, nav.currentPointIndex]);
+  }, [viewMode, nav.currentPointIndex, mapLoaded]);
 
   // Sync / Draw Selected Route Analysis on Map
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapLoaded) return;
 
-    // 1. Clear previous layers
-    if (analysisPolylineRef.current) {
-      analysisPolylineRef.current.remove();
-      analysisPolylineRef.current = null;
-    }
+    // 1. Clear previous markers
     if (analysisStartMarkerRef.current) {
       analysisStartMarkerRef.current.remove();
       analysisStartMarkerRef.current = null;
@@ -1004,37 +1527,41 @@ export default function App() {
       analysisEndMarkerRef.current = null;
     }
 
+    const source = map.getSource('analysis-route') as maplibregl.GeoJSONSource;
+    if (source) {
+      source.setData({ type: 'FeatureCollection', features: [] });
+    }
+
     if (viewMode !== 'analysis' || !selectedAnalysisId) return;
 
     const activeAnalysis = routeAnalyses.find(r => r.id === selectedAnalysisId);
     if (!activeAnalysis || !activeAnalysis.coordinates || activeAnalysis.coordinates.length === 0) return;
 
-    const latlngs = activeAnalysis.coordinates.map(c => L.latLng(c[0], c[1]));
+    const coordinates = activeAnalysis.coordinates.map(c => [c[1], c[0]]); // [lng, lat]
 
     // Determine color based on mode
     let color = '#a78bfa'; // purple default
-    let dashArray = undefined;
     if (activeAnalysis.mode === 'walk') {
       color = '#f97316'; // orange-red
-      dashArray = '5, 8';
     } else if (activeAnalysis.mode === 'bike') {
       color = '#10b981'; // emerald
-      dashArray = '8, 8';
     } else if (activeAnalysis.mode === 'drive') {
       color = '#8b5cf6'; // violet/purple
     }
 
-    // Draw path
-    const polyline = L.polyline(latlngs, {
-      color,
-      weight: 6,
-      opacity: 0.85,
-      dashArray,
-      lineCap: 'round',
-      lineJoin: 'round'
-    }).addTo(map);
-
-    analysisPolylineRef.current = polyline;
+    // Update GeoJSON source
+    if (source) {
+      source.setData({
+        type: 'Feature',
+        properties: { color },
+        geometry: {
+          type: 'LineString',
+          coordinates
+        }
+      });
+      // Dynamically apply the line paint property
+      map.setPaintProperty('analysis-route-layer', 'line-color', color);
+    }
 
     // Draw Start Marker
     const startHtml = `
@@ -1042,20 +1569,22 @@ export default function App() {
         <span class="text-xs select-none">🟢</span>
       </div>
     `;
-    const startIcon = L.divIcon({
-      className: 'analysis-start-icon',
-      html: startHtml,
-      iconSize: [32, 32],
-      iconAnchor: [16, 16]
-    });
-    const startMarker = L.marker(latlngs[0], { icon: startIcon }).addTo(map);
-    startMarker.bindPopup(`
-      <div class="p-1 font-sans text-xs bg-slate-950 text-white rounded">
-        <p class="font-bold text-emerald-400 border-b border-slate-800 pb-0.5 mb-1">🟢 起點 (Departure)</p>
-        <p class="text-slate-300 font-medium">${activeAnalysis.start_name}</p>
-      </div>
-    `, { closeButton: false });
-    analysisStartMarkerRef.current = startMarker;
+    const startEl = document.createElement('div');
+    startEl.className = 'analysis-start-icon';
+    startEl.innerHTML = startHtml;
+
+    const startPopup = new maplibregl.Popup({ offset: 16, closeButton: false })
+      .setHTML(`
+        <div class="p-1 font-sans text-xs bg-slate-950 text-white rounded">
+          <p class="font-bold text-emerald-400 border-b border-slate-800 pb-0.5 mb-1">🟢 起點 (Departure)</p>
+          <p class="text-slate-300 font-medium">${activeAnalysis.start_name}</p>
+        </div>
+      `);
+
+    analysisStartMarkerRef.current = new maplibregl.Marker({ element: startEl })
+      .setLngLat([coordinates[0][0], coordinates[0][1]])
+      .setPopup(startPopup)
+      .addTo(map);
 
     // Draw End Marker
     const endHtml = `
@@ -1063,25 +1592,34 @@ export default function App() {
         <span class="text-xs select-none">🏁</span>
       </div>
     `;
-    const endIcon = L.divIcon({
-      className: 'analysis-end-icon',
-      html: endHtml,
-      iconSize: [32, 32],
-      iconAnchor: [16, 16]
-    });
-    const endMarker = L.marker(latlngs[latlngs.length - 1], { icon: endIcon }).addTo(map);
-    endMarker.bindPopup(`
-      <div class="p-1 font-sans text-xs bg-slate-950 text-white rounded">
-        <p class="font-bold text-red-400 border-b border-slate-800 pb-0.5 mb-1">🏁 終點 (Destination)</p>
-        <p class="text-slate-300 font-medium">${activeAnalysis.end_name}</p>
-      </div>
-    `, { closeButton: false });
-    analysisEndMarkerRef.current = endMarker;
+    const endEl = document.createElement('div');
+    endEl.className = 'analysis-end-icon';
+    endEl.innerHTML = endHtml;
+
+    const endPopup = new maplibregl.Popup({ offset: 16, closeButton: false })
+      .setHTML(`
+        <div class="p-1 font-sans text-xs bg-slate-950 text-white rounded">
+          <p class="font-bold text-red-400 border-b border-slate-800 pb-0.5 mb-1">🏁 終點 (Destination)</p>
+          <p class="text-slate-300 font-medium">${activeAnalysis.end_name}</p>
+        </div>
+      `);
+
+    analysisEndMarkerRef.current = new maplibregl.Marker({ element: endEl })
+      .setLngLat([coordinates[coordinates.length - 1][0], coordinates[coordinates.length - 1][1]])
+      .setPopup(endPopup)
+      .addTo(map);
 
     // Fit map bounds
-    map.fitBounds(polyline.getBounds(), { padding: [50, 50] });
+    const lngs = coordinates.map(c => c[0]);
+    const lats = coordinates.map(c => c[1]);
+    const minLng = Math.min(...lngs);
+    const maxLng = Math.max(...lngs);
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
 
-  }, [viewMode, selectedAnalysisId, routeAnalyses]);
+    map.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 50 });
+
+  }, [viewMode, selectedAnalysisId, routeAnalyses, mapLoaded]);
 
   // Import Analysis Route to Simulation checkpoints
   const handleImportRouteForSimulation = () => {
@@ -1127,7 +1665,7 @@ export default function App() {
     // Re-center map to the first point
     const map = mapRef.current;
     if (map) {
-      map.setView([mappedRoutePoints[0].lat, mappedRoutePoints[0].lng], 16);
+      map.jumpTo({ center: [mappedRoutePoints[0].lng, mappedRoutePoints[0].lat], zoom: 16 });
     }
 
     // Switch view mode to driver cockpit
@@ -1258,9 +1796,14 @@ export default function App() {
 
     // Refit map bounds to encompass the new route
     if (mapRef.current && smoothPoints.length > 0) {
-      const latlngs = smoothPoints.map(p => L.latLng(p.lat, p.lng));
-      const bounds = L.polyline(latlngs).getBounds();
-      mapRef.current.fitBounds(bounds, { padding: [40, 40] });
+      const lngs = smoothPoints.map(p => p.lng);
+      const lats = smoothPoints.map(p => p.lat);
+      const minLng = Math.min(...lngs);
+      const maxLng = Math.max(...lngs);
+      const minLat = Math.min(...lats);
+      const maxLat = Math.max(...lats);
+      
+      mapRef.current.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 40 });
     }
   };
 
@@ -1393,8 +1936,8 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-1 grid grid-cols-1 xl:grid-cols-12 gap-5 p-5 max-w-[1700px] w-full mx-auto overflow-hidden">
         
-        {/* LEFT COLUMN: Map HUD and Active Guidance (8/12 Columns) */}
-        <div className="xl:col-span-8 flex flex-col gap-4">
+        {/* LEFT COLUMN: Map HUD and Active Guidance (8/12 or 12/12 Columns depending on Console Expanded state) */}
+        <div className={`${consoleExpanded ? 'xl:col-span-8' : 'xl:col-span-12'} flex flex-col gap-4 transition-all duration-300`}>
           
           {/* Dynamic Top Sign / Turn-by-turn Banner */}
           <div className="bg-blue-600 text-white p-4 rounded-xl border border-blue-400/20 shadow-xl shadow-blue-950/10 flex items-center justify-between transition-all duration-300">
@@ -1419,14 +1962,25 @@ export default function App() {
               </div>
             </div>
 
-            <button
-              onClick={playManualVoiceHelp}
-              className="bg-blue-500/50 hover:bg-blue-500 hover:scale-105 active:scale-95 border border-blue-300/30 rounded-lg p-3 flex items-center gap-2 text-white font-mono text-xs font-bold transition-all shrink-0 cursor-pointer shadow-md"
-              title="播報語音導航指引"
-            >
-              <Volume2 className="w-5 h-5 animate-pulse" />
-              <span className="hidden sm:inline">語音播報</span>
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={playManualVoiceHelp}
+                className="bg-blue-500/50 hover:bg-blue-500 hover:scale-105 active:scale-95 border border-blue-300/30 rounded-lg p-3 flex items-center gap-2 text-white font-mono text-xs font-bold transition-all cursor-pointer shadow-md"
+                title="播報語音導航指引"
+              >
+                <Volume2 className="w-5 h-5 animate-pulse" />
+                <span className="hidden sm:inline">語音播報</span>
+              </button>
+
+              <button
+                onClick={() => setConsoleExpanded(prev => !prev)}
+                className="bg-blue-500/50 hover:bg-blue-500 hover:scale-105 active:scale-95 border border-blue-300/30 rounded-lg p-3 flex items-center gap-2 text-white font-mono text-xs font-bold transition-all cursor-pointer shadow-md"
+                title={consoleExpanded ? "收起右側控制面板 (CONSOLE)" : "展開右側控制面板 (CONSOLE)"}
+              >
+                {consoleExpanded ? <ChevronRight className="w-5 h-5" /> : <ChevronLeft className="w-5 h-5" />}
+                <span className="hidden sm:inline">{consoleExpanded ? "收起面板" : "展開面板"}</span>
+              </button>
+            </div>
           </div>
 
           {/* Map Viewer Shell */}
@@ -1448,13 +2002,13 @@ export default function App() {
               />
             )}
 
-            {/* Interactive Leaflet Map Container. Conditionally placed inside PIP when viewMode === 'driver' */}
+            {/* Interactive MapLibre Map Container. Conditionally placed inside PIP when viewMode === 'driver' */}
             <div className={`transition-all duration-500 ease-in-out ${
               viewMode === 'driver' 
                 ? 'absolute bottom-4 right-4 w-44 h-32 md:w-60 md:h-40 z-40 rounded-xl border-2 border-slate-800 shadow-2xl overflow-hidden'
                 : 'absolute inset-0 z-0'
             }`}>
-              <div ref={mapContainerRef} className="w-full h-full" id="leaflet-map-element" />
+              <div ref={mapContainerRef} className="w-full h-full" id="maplibre-map-element" />
               {viewMode === 'driver' && (
                 <div className="absolute top-2 left-2 bg-slate-900/95 text-[8px] font-mono font-bold text-blue-400 border border-slate-800 rounded px-1.5 py-0.5 select-none z-[1000] flex items-center gap-1 shadow-md">
                   <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse shrink-0"></span>
@@ -1954,7 +2508,7 @@ export default function App() {
                               onClick={() => {
                                 setSelectedCheckpointIndex(idx);
                                 if (mapRef.current) {
-                                  mapRef.current.setView([cp.lat, cp.lng], 16, { animate: true });
+                                  mapRef.current.easeTo({ center: [cp.lng, cp.lat], zoom: 16 });
                                   addLog('info', `🔍 地圖視角已對焦至控制點 ${idx + 1}：${cp.streetName}`);
                                 }
                               }}
@@ -2151,7 +2705,7 @@ export default function App() {
         </div>
 
         {/* RIGHT COLUMN: Simulator Play Deck & API Probe (4/12 Columns) */}
-        <div className="xl:col-span-4 flex flex-col gap-4">
+        <div className={`xl:col-span-4 flex-col gap-4 ${consoleExpanded ? 'flex' : 'hidden'} transition-all duration-300`}>
           
           {/* Simulation Control Deck */}
                     {/* OSMnx Route Analysis Control Panel (Alternative View Mode Panel) */}

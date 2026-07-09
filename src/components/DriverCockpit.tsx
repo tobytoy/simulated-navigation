@@ -15,6 +15,15 @@ import {
   Info
 } from 'lucide-react';
 import { TrafficEvent } from '../types';
+import sevenElevenLogo from '@/assets/icron/7eleven.svg';
+import familyMartLogo from '@/assets/icron/familymart.svg';
+import starbucksLogo from '@/assets/icron/starbucks.svg';
+import mcdonaldsLogo from '@/assets/icron/mcdonalds.svg';
+import mrtLogo from '@/assets/icron/mrt.svg';
+import hospitalLogo from '@/assets/icron/hospital.svg';
+import teslaLogo from '@/assets/icron/tesla.svg';
+import busLogo from '@/assets/icron/bus.svg';
+import ubikeLogo from '@/assets/icron/ubike.svg';
 
 interface DriverCockpitProps {
   currentSpeed: number;
@@ -638,30 +647,105 @@ export default function DriverCockpit({
                           {nearestEvent.event.title.length > 5 ? nearestEvent.event.title.slice(0, 4) + '..' : nearestEvent.event.title}
                         </text>
                       </g>
-                    ) : nearestEvent.event.type === 'poi' ? (
-                      // POI Store Sign: Emerald green shop sign
-                      <g>
-                        {isNight && <rect x={`${targetX - scale * 1.1}%`} y={`${targetY - scale * 1.35}%`} width={`${scale * 2.2}%`} height={`${scale * 2.3}%`} rx="5" fill="#10b981" opacity="0.25" />}
-                        <rect 
-                          x={`${targetX - scale * 1.05}%`} 
-                          y={`${targetY - scale * 1.3}%`} 
-                          width={`${scale * 2.1}%`} 
-                          height={`${scale * 2.2}%`} 
-                          rx="4" 
-                          fill="#064e3b" 
-                          stroke="#10b981" 
-                          strokeWidth="2" 
-                        />
-                        <text x={`${targetX}%`} y={`${targetY - scale * 0.4}%`} fill="#ffffff" fontSize={scale * 0.7} textAnchor="middle">
-                          {nearestEvent.event.title.includes('星巴克') || nearestEvent.event.title.toLowerCase().includes('starbucks') ? '☕' : '🏪'}
-                        </text>
-                        <text x={`${targetX}%`} y={`${targetY + scale * 0.3}%`} fill="#ffffff" fontSize={scale * 0.32} textAnchor="middle" fontWeight="bold" fontFamily="sans-serif">
-                          商店
-                        </text>
-                        <text x={`${targetX}%`} y={`${targetY + scale * 0.75}%`} fill="#34d399" fontSize={scale * 0.26} textAnchor="middle" fontWeight="medium" fontFamily="sans-serif">
-                          {nearestEvent.event.title.length > 6 ? nearestEvent.event.title.slice(0, 5) + '..' : nearestEvent.event.title}
-                        </text>
-                      </g>
+                    ) : nearestEvent.event.type === 'poi' ? ( (() => {
+                      let logoUrl = '';
+                      let poiBorderColor = '#10b981';
+                      let poiBgColor = '#064e3b';
+                      let poiTextGlow = '#34d399';
+                      let poiLabel = '商店';
+
+                      if (nearestEvent.event.title.includes('7-Eleven')) {
+                        logoUrl = sevenElevenLogo;
+                        poiBorderColor = '#008060';
+                        poiBgColor = '#022d22';
+                        poiTextGlow = '#34d399';
+                        poiLabel = '便利商店';
+                      } else if (nearestEvent.event.title.includes('全家')) {
+                        logoUrl = familyMartLogo;
+                        poiBorderColor = '#00A0E9';
+                        poiBgColor = '#0b2e4f';
+                        poiTextGlow = '#60a5fa';
+                        poiLabel = '便利商店';
+                      } else if (nearestEvent.event.title.includes('星巴克')) {
+                        logoUrl = starbucksLogo;
+                        poiBorderColor = '#00704A';
+                        poiBgColor = '#022e1f';
+                        poiTextGlow = '#34d399';
+                        poiLabel = '咖啡廳';
+                      } else if (nearestEvent.event.title.includes('麥當勞')) {
+                        logoUrl = mcdonaldsLogo;
+                        poiBorderColor = '#DA291C';
+                        poiBgColor = '#3d0d0a';
+                        poiTextGlow = '#fca5a5';
+                        poiLabel = '速食店';
+                      } else if (nearestEvent.event.title.includes('醫院')) {
+                        logoUrl = hospitalLogo;
+                        poiBorderColor = '#005BAC';
+                        poiBgColor = '#0f2347';
+                        poiTextGlow = '#93c5fd';
+                        poiLabel = '醫療機構';
+                      } else if (nearestEvent.event.title.includes('捷運')) {
+                        logoUrl = mrtLogo;
+                        poiBorderColor = '#0070BD';
+                        poiBgColor = '#0c273e';
+                        poiTextGlow = '#93c5fd';
+                        poiLabel = '捷運地鐵站';
+                      } else if (nearestEvent.event.title.includes('Tesla') || nearestEvent.event.title.includes('充電')) {
+                        logoUrl = teslaLogo;
+                        poiBorderColor = '#E82127';
+                        poiBgColor = '#3f0c0d';
+                        poiTextGlow = '#fca5a5';
+                        poiLabel = '充電站';
+                      } else if (nearestEvent.event.title.includes('YouBike')) {
+                        logoUrl = ubikeLogo;
+                        poiBorderColor = '#FFB300';
+                        poiBgColor = '#3d2e08';
+                        poiTextGlow = '#fde047';
+                        poiLabel = '共享單車';
+                      } else if (nearestEvent.event.title.includes('公車')) {
+                        logoUrl = busLogo;
+                        poiBorderColor = '#3B82F6';
+                        poiBgColor = '#0f244a';
+                        poiTextGlow = '#93c5fd';
+                        poiLabel = '公車站';
+                      }
+
+                      return (
+                        <g>
+                          {isNight && <rect x={`${targetX - scale * 1.1}%`} y={`${targetY - scale * 1.35}%`} width={`${scale * 2.2}%`} height={`${scale * 2.3}%`} rx="5" fill={poiBorderColor} opacity="0.25" />}
+                          <rect 
+                            x={`${targetX - scale * 1.05}%`} 
+                            y={`${targetY - scale * 1.3}%`} 
+                            width={`${scale * 2.1}%`} 
+                            height={`${scale * 2.2}%`} 
+                            rx="4" 
+                            fill={poiBgColor} 
+                            stroke={poiBorderColor} 
+                            strokeWidth="2" 
+                          />
+                          {logoUrl ? (
+                            <image
+                              href={logoUrl}
+                              x={`${targetX - scale * 0.6}%`}
+                              y={`${targetY - scale * 1.1}%`}
+                              width={`${scale * 1.2}%`}
+                              height={`${scale * 1.2}%`}
+                              style={nearestEvent.event.title.includes('YouBike') ? { filter: 'invert(1) sepia(1) saturate(5) hue-rotate(15deg)' } : undefined}
+                            />
+                          ) : (
+                            <text x={`${targetX}%`} y={`${targetY - scale * 0.4}%`} fill="#ffffff" fontSize={scale * 0.7} textAnchor="middle">
+                              🏪
+                            </text>
+                          )}
+                          <text x={`${targetX}%`} y={`${targetY + scale * 0.4}%`} fill="#ffffff" fontSize={scale * 0.3} textAnchor="middle" fontWeight="bold" fontFamily="sans-serif">
+                            {poiLabel}
+                          </text>
+                          <text x={`${targetX}%`} y={`${targetY + scale * 0.8}%`} fill={poiTextGlow} fontSize={scale * 0.24} textAnchor="middle" fontWeight="medium" fontFamily="sans-serif">
+                            {nearestEvent.event.title.length > 6 ? nearestEvent.event.title.slice(0, 5) + '..' : nearestEvent.event.title}
+                          </text>
+                        </g>
+                      );
+                    })()
                     ) : nearestEvent.event.type === 'parking' ? (
                       // Parking lot sign: Standard blue P sign with height limit info
                       <g>
