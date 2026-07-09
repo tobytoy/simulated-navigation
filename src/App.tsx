@@ -630,6 +630,7 @@ export default function App() {
     if (!map || !mapLoaded) return;
 
     let debounceTimer: any = null;
+    let abortController: AbortController | null = null;
 
     const fetchOsmPOIs = async () => {
       const zoom = map.getZoom();
@@ -640,6 +641,13 @@ export default function App() {
       }
 
       setOsmStatus('loading');
+
+      // Cancel previous request to avoid spamming the servers
+      if (abortController) {
+        abortController.abort();
+      }
+      abortController = new AbortController();
+      const signal = abortController.signal;
 
       const bounds = map.getBounds();
       const south = bounds.getSouth();
@@ -665,15 +673,41 @@ export default function App() {
       `;
 
       try {
-        const response = await fetch('https://overpass-api.de/api/interpreter', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded'
-          },
-          body: `data=${encodeURIComponent(query)}`
-        });
+        // Fallback list of public Overpass API interpreter endpoints
+        const endpoints = [
+          'https://overpass-api.de/api/interpreter',
+          'https://overpass.kumi.systems/api/interpreter',
+          'https://overpass.n.openstreetmap.de/api/interpreter'
+        ];
 
-        if (!response.ok) throw new Error('Overpass API query failed');
+        let response = null;
+        let lastError = null;
+
+        for (const url of endpoints) {
+          try {
+            response = await fetch(url, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded'
+              },
+              body: `data=${encodeURIComponent(query)}`,
+              signal
+            });
+            if (response.ok) {
+              break;
+            }
+          } catch (fetchErr: any) {
+            if (fetchErr.name === 'AbortError') {
+              throw fetchErr; // bubble up abort error
+            }
+            lastError = fetchErr;
+          }
+        }
+
+        if (!response || !response.ok) {
+          throw lastError || new Error('All Overpass API endpoints failed');
+        }
+
         const data = await response.json();
 
         if (data && data.elements) {
@@ -744,7 +778,8 @@ export default function App() {
           setOsmPOIcount(0);
           setOsmStatus('success');
         }
-      } catch (err) {
+      } catch (err: any) {
+        if (err.name === 'AbortError') return; // ignore aborted fetch
         setOsmStatus('error');
         console.error('Failed to fetch OSM POIs:', err);
       }
@@ -768,6 +803,9 @@ export default function App() {
       if (debounceTimer) clearTimeout(debounceTimer);
       map.off('moveend', handleMapMove);
       map.off('zoomend', handleMapMove);
+      if (abortController) {
+        abortController.abort();
+      }
     };
   }, [mapLoaded]);
 
